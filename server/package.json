@@ -1,0 +1,8 @@
+{
+  "name": "wisp-arena-server",
+  "version": "1.0.0",
+  "main": "server.js",
+  "dependencies": {
+    "uWebSockets.js": "uNetworking/uWebSockets.js#v20.44.0"
+  }
+}
