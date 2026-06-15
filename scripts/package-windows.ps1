@@ -1,7 +1,9 @@
 param(
   [string]$BuildDir = "build/windows",
   [string]$Configuration = "Release",
-  [string]$ServerUrl = $env:WISP_SERVER_URL
+  [string]$ServerUrl = $env:WISP_SERVER_URL,
+  [switch]$Installer,
+  [string]$InnoSetupCompiler = $env:INNO_SETUP_COMPILER
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +28,7 @@ if ([string]::IsNullOrWhiteSpace($ServerUrl)) {
 $DistRoot = Join-Path $Root "dist"
 $PackageDir = Join-Path $DistRoot "wisp-arena-windows"
 $ZipPath = Join-Path $DistRoot "wisp-arena-windows.zip"
+$InstallerPath = Join-Path $DistRoot "wisp-arena-setup.exe"
 
 New-Item -ItemType Directory -Force $DistRoot | Out-Null
 if (Test-Path $PackageDir) {
@@ -33,6 +36,9 @@ if (Test-Path $PackageDir) {
 }
 if (Test-Path $ZipPath) {
   Remove-Item -Force $ZipPath
+}
+if (Test-Path $InstallerPath) {
+  Remove-Item -Force $InstallerPath
 }
 New-Item -ItemType Directory -Force $PackageDir | Out-Null
 
@@ -52,3 +58,32 @@ Edit server-url.txt if the server address changes.
 Compress-Archive -Path (Join-Path $PackageDir "*") -DestinationPath $ZipPath
 
 Write-Host "Wrote $ZipPath"
+
+if ($Installer) {
+  if ([string]::IsNullOrWhiteSpace($InnoSetupCompiler)) {
+    $InnoSetupCompiler = (Get-Command "iscc.exe" -ErrorAction SilentlyContinue).Source
+  }
+
+  if ([string]::IsNullOrWhiteSpace($InnoSetupCompiler)) {
+    $DefaultInnoPath = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+    if (Test-Path $DefaultInnoPath) {
+      $InnoSetupCompiler = $DefaultInnoPath
+    }
+  }
+
+  if ([string]::IsNullOrWhiteSpace($InnoSetupCompiler) -or !(Test-Path $InnoSetupCompiler)) {
+    throw "Could not find Inno Setup compiler. Install Inno Setup 6 or pass -InnoSetupCompiler C:\Path\To\ISCC.exe"
+  }
+
+  $InnoScript = Join-Path $Root "installer\wisp-arena.iss"
+  & $InnoSetupCompiler `
+    "/DSourceDir=$PackageDir" `
+    "/DOutputDir=$DistRoot" `
+    $InnoScript
+
+  if (!(Test-Path $InstallerPath)) {
+    throw "Installer build completed, but $InstallerPath was not created"
+  }
+
+  Write-Host "Wrote $InstallerPath"
+}
