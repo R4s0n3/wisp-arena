@@ -208,6 +208,9 @@ static std::string resolveServerUrl(int argc, char **argv) {
 int main(int argc, char **argv) {
   std::string url = resolveServerUrl(argc, argv);
 
+  SetConfigFlags(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
+  InitWindow(SW, SH, "Wisp Arena");
+
   // --- networking ---
   ix::initNetSystem();
   std::mutex mtx;
@@ -216,6 +219,9 @@ int main(int argc, char **argv) {
   std::string connectionDetail = url;
   ix::WebSocket sock;
   sock.setUrl(url);
+  sock.setHandshakeTimeout(5);
+  sock.setMinWaitBetweenReconnectionRetries(1000);
+  sock.setMaxWaitBetweenReconnectionRetries(5000);
   sock.setOnMessageCallback([&](const ix::WebSocketMessagePtr &m) {
     std::lock_guard<std::mutex> l(mtx);
     if (m->type == ix::WebSocketMessageType::Open) {
@@ -232,9 +238,6 @@ int main(int argc, char **argv) {
     }
   });
   sock.start();
-
-  SetConfigFlags(FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
-  InitWindow(SW, SH, "Wisp Arena");
 
   ParticleSystem fx;
   std::unordered_map<int, Remote> remotes;
@@ -253,6 +256,7 @@ int main(int argc, char **argv) {
     {
       std::lock_guard<std::mutex> l(mtx);
       for (auto &s : inbox) {
+        if (s.empty()) continue;
         int id, team, dmg;
         float x, y, dx, dy;
         switch (s[0]) {
@@ -473,7 +477,7 @@ int main(int argc, char **argv) {
     }
     DrawText(myId >= 0 ? TextFormat("ID %d  TEAM %d", myId, myTeam)
                        : statusText.c_str(),
-             20, 42, 18, GRAY);
+             20, 42, 18, LIGHTGRAY);
     if (myId >= 0) {
       float superReady = 1.0f - std::clamp(superCd / SUPER_COOLDOWN, 0.0f, 1.0f);
       float dashReady = 1.0f - std::clamp(dashCd / DASH_COOLDOWN, 0.0f, 1.0f);
@@ -487,7 +491,7 @@ int main(int argc, char **argv) {
       DrawRectangle(100, 84, (int)(90 * dashReady), 8, Color{120, 245, 210, 255});
     }
     if (myId < 0 && !detailText.empty()) {
-      DrawText(detailText.c_str(), 20, 64, 14, DARKGRAY);
+      DrawText(detailText.c_str(), 20, 64, 14, GRAY);
     }
     EndDrawing();
   }
