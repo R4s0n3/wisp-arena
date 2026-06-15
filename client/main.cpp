@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <algorithm>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -20,6 +21,17 @@
 static const int SW = 1280, SH = 720;
 static const int MAX_PARTICLES = 4096;
 static const char *DEFAULT_SERVER_URL = "ws://localhost:9001";
+static const float PLAYER_RADIUS = 18.0f;
+static const float MOVE_SPEED = 320.0f;
+static const float BULLET_SPEED = 600.0f;
+static const float SUPER_BULLET_SPEED = 480.0f;
+static const int BULLET_DAMAGE = 25;
+static const int SUPER_DAMAGE = 55;
+static const float SUPER_COOLDOWN = 6.0f;
+static const float DASH_COOLDOWN = 1.1f;
+static const float DASH_SPEED = 980.0f;
+static const float DASH_DRAG = 8.0f;
+static const float REMOTE_SMOOTHING = 18.0f;
 
 static float frand(float a, float b) {
   return a + (b - a) * (float)GetRandomValue(0, 1000) / 1000.0f;
@@ -72,8 +84,53 @@ struct ParticleSystem {
 };
 
 // ---------- Game entities ----------
-struct Remote { Vector2 pos{0, 0}; int team = 0; };
-struct Bullet { Vector2 pos, vel; int owner, team; float life; };
+struct Remote {
+  Vector2 pos{0, 0};
+  Vector2 target{0, 0};
+  Vector2 dashVel{0, 0};
+  int team = 0;
+  bool seen = false;
+};
+struct Bullet {
+  Vector2 pos, vel;
+  int owner, team, damage;
+  float life, radius;
+  bool super;
+};
+
+static Vector2 add(Vector2 a, Vector2 b) { return {a.x + b.x, a.y + b.y}; }
+static Vector2 scale(Vector2 v, float s) { return {v.x * s, v.y * s}; }
+static float length(Vector2 v) { return sqrtf(v.x * v.x + v.y * v.y); }
+
+static Vector2 normalized(Vector2 v) {
+  float len = length(v);
+  return len > 0.001f ? scale(v, 1.0f / len) : Vector2{0, 0};
+}
+
+static Vector2 clampToArena(Vector2 p) {
+  p.x = std::clamp(p.x, PLAYER_RADIUS, (float)SW - PLAYER_RADIUS);
+  p.y = std::clamp(p.y, PLAYER_RADIUS, (float)SH - PLAYER_RADIUS);
+  return p;
+}
+
+static float approachZero(float value, float amount) {
+  if (value > 0) return std::max(0.0f, value - amount);
+  if (value < 0) return std::min(0.0f, value + amount);
+  return 0;
+}
+
+static Vector2 decayVelocity(Vector2 v, float dt) {
+  float amount = DASH_SPEED * DASH_DRAG * dt;
+  v.x = approachZero(v.x, amount);
+  v.y = approachZero(v.y, amount);
+  return v;
+}
+
+static Bullet makeBullet(Vector2 pos, Vector2 vel, int owner, int team,
+                         bool super) {
+  return {pos, vel, owner, team, super ? SUPER_DAMAGE : BULLET_DAMAGE, 2.0f,
+          super ? 11.0f : 5.0f, super};
+}
 
 static void drawWisp(Vector2 p, Color c) {
   BeginBlendMode(BLEND_ADDITIVE);
@@ -143,12 +200,23 @@ int main(int argc, char **argv) {
   ix::initNetSystem();
   std::mutex mtx;
   std::vector<std::string> inbox;
+  std::string connectionStatus = "connecting...";
+  std::string connectionDetail = url;
   ix::WebSocket sock;
   sock.setUrl(url);
   sock.setOnMessageCallback([&](const ix::WebSocketMessagePtr &m) {
-    if (m->type == ix::WebSocketMessageType::Message) {
-      std::lock_guard<std::mutex> l(mtx);
+    std::lock_guard<std::mutex> l(mtx);
+    if (m->type == ix::WebSocketMessageType::Open) {
+      connectionStatus = "websocket open, waiting for server...";
+      connectionDetail = url;
+    } else if (m->type == ix::WebSocketMessageType::Message) {
       inbox.push_back(m->str);
+    } else if (m->type == ix::WebSocketMessageType::Error) {
+      connectionStatus = "connection error";
+      connectionDetail = m->errorInfo.reason;
+    } else if (m->type == ix::WebSocketMessageType::Close) {
+      connectionStatus = "connection closed";
+      connectionDetail = m->closeInfo.reason.empty() ? url : m->closeInfo.reason;
     }
   });
   sock.start();
@@ -162,7 +230,9 @@ int main(int argc, char **argv) {
 
   int myId = -1, myTeam = 0, hp = 100;
   Vector2 me = {frand(100, SW - 100), frand(100, SH - 100)};
-  float sendTimer = 0, shootCd = 0;
+  Vector2 dashVel = {0, 0};
+  Vector2 lastAim = {1, 0};
+  float sendTimer = 0, shootCd = 0, superCd = 0, dashCd = 0;
 
   while (!WindowShouldClose()) {
     float dt = GetFrameTime();
@@ -177,18 +247,45 @@ int main(int argc, char **argv) {
         case 'W':
           if (sscanf(s.c_str(), "W|%d|%d", &id, &team) == 2) {
             myId = id; myTeam = team;
+            connectionStatus = "connected";
+            connectionDetail = url;
           }
           break;
         case 'P':
           if (sscanf(s.c_str(), "P|%d|%f|%f|%d", &id, &x, &y, &team) == 4) {
-            remotes[id].pos = {x, y};
-            remotes[id].team = team;
+            if (id == myId) break;
+            Remote &r = remotes[id];
+            r.team = team;
+            r.target = {x, y};
+            if (!r.seen) {
+              r.pos = r.target;
+              r.seen = true;
+            }
           }
           break;
         case 'F':
           if (sscanf(s.c_str(), "F|%d|%f|%f|%f|%f|%d", &id, &x, &y, &dx, &dy,
-                     &team) == 6)
-            bullets.push_back({{x, y}, {dx, dy}, id, team, 2.0f});
+                     &team) == 6 && id != myId)
+            bullets.push_back(makeBullet({x, y}, {dx, dy}, id, team, false));
+          break;
+        case 'S':
+          if (sscanf(s.c_str(), "S|%d|%f|%f|%f|%f|%d", &id, &x, &y, &dx, &dy,
+                     &team) == 6 && id != myId) {
+            bullets.push_back(makeBullet({x, y}, {dx, dy}, id, team, true));
+            fx.burst({x, y}, 10, 180, teamColor(team));
+          }
+          break;
+        case 'D':
+          if (sscanf(s.c_str(), "D|%d|%f|%f|%f|%f|%d", &id, &x, &y, &dx, &dy,
+                     &team) == 6 && id != myId) {
+            Remote &r = remotes[id];
+            r.team = team;
+            r.pos = {x, y};
+            r.target = {x, y};
+            r.dashVel = {dx, dy};
+            r.seen = true;
+            fx.burst(r.pos, 12, 220, teamColor(team));
+          }
           break;
         case 'H':
           if (sscanf(s.c_str(), "H|%d|%d", &id, &dmg) == 2) {
@@ -219,30 +316,67 @@ int main(int argc, char **argv) {
     if (IsKeyDown(KEY_S)) dir.y += 1;
     if (IsKeyDown(KEY_A)) dir.x -= 1;
     if (IsKeyDown(KEY_D)) dir.x += 1;
-    float len = sqrtf(dir.x * dir.x + dir.y * dir.y);
-    if (len > 0) {
-      me.x += dir.x / len * 320 * dt;
-      me.y += dir.y / len * 320 * dt;
+    Vector2 moveDir = normalized(dir);
+    if (moveDir.x != 0 || moveDir.y != 0) {
+      lastAim = moveDir;
+      me = add(me, scale(moveDir, MOVE_SPEED * dt));
     }
-    if (me.x < 20) me.x = 20;
-    if (me.x > SW - 20) me.x = SW - 20;
-    if (me.y < 20) me.y = 20;
-    if (me.y > SH - 20) me.y = SH - 20;
+    dashCd -= dt;
+    bool dashPressed = IsKeyPressed(KEY_LEFT_SHIFT) || IsKeyPressed(KEY_RIGHT_SHIFT);
+    if (dashCd <= 0 && dashPressed && myId >= 0) {
+      Vector2 dashDir = moveDir;
+      if (dashDir.x == 0 && dashDir.y == 0) dashDir = lastAim;
+      dashVel = scale(normalized(dashDir), DASH_SPEED);
+      char buf[96];
+      snprintf(buf, sizeof buf, "D|%.1f|%.1f|%.1f|%.1f", me.x, me.y,
+               dashVel.x, dashVel.y);
+      sock.send(buf);
+      fx.burst(me, 16, 280, teamColor(myTeam));
+      dashCd = DASH_COOLDOWN;
+    }
+    me = add(me, scale(dashVel, dt));
+    dashVel = decayVelocity(dashVel, dt);
+    me = clampToArena(me);
+
+    for (auto &[rid, r] : remotes) {
+      r.target = clampToArena(r.target);
+      r.pos = add(r.pos, scale(r.dashVel, dt));
+      float blend = 1.0f - expf(-REMOTE_SMOOTHING * dt);
+      r.pos.x += (r.target.x - r.pos.x) * blend;
+      r.pos.y += (r.target.y - r.pos.y) * blend;
+      r.pos = clampToArena(r.pos);
+      r.dashVel = decayVelocity(r.dashVel, dt);
+    }
 
     // --- shooting ---
     shootCd -= dt;
+    superCd -= dt;
     if (shootCd <= 0 && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && myId >= 0) {
       Vector2 m = GetMousePosition();
       float dx = m.x - me.x, dy = m.y - me.y;
-      float l2 = sqrtf(dx * dx + dy * dy);
-      if (l2 > 1) {
-        dx = dx / l2 * 600;
-        dy = dy / l2 * 600;
-        bullets.push_back({me, {dx, dy}, myId, myTeam, 2.0f});
+      Vector2 shotDir = normalized({dx, dy});
+      if (shotDir.x != 0 || shotDir.y != 0) {
+        dx = shotDir.x * BULLET_SPEED;
+        dy = shotDir.y * BULLET_SPEED;
+        bullets.push_back(makeBullet(me, {dx, dy}, myId, myTeam, false));
         char buf[96];
         snprintf(buf, sizeof buf, "F|%.1f|%.1f|%.1f|%.1f", me.x, me.y, dx, dy);
         sock.send(buf);
         shootCd = 0.2f;
+      }
+    }
+    if (superCd <= 0 && IsKeyPressed(KEY_E) && myId >= 0) {
+      Vector2 m = GetMousePosition();
+      Vector2 shotDir = normalized({m.x - me.x, m.y - me.y});
+      if (shotDir.x != 0 || shotDir.y != 0) {
+        Vector2 vel = scale(shotDir, SUPER_BULLET_SPEED);
+        bullets.push_back(makeBullet(me, vel, myId, myTeam, true));
+        char buf[96];
+        snprintf(buf, sizeof buf, "S|%.1f|%.1f|%.1f|%.1f", me.x, me.y, vel.x,
+                 vel.y);
+        sock.send(buf);
+        fx.burst(me, 18, 260, teamColor(myTeam));
+        superCd = SUPER_COOLDOWN;
       }
     }
 
@@ -261,11 +395,13 @@ int main(int argc, char **argv) {
         for (auto &[rid, r] : remotes) {
           if (r.team == myTeam) continue;
           float hx = r.pos.x - b.pos.x, hy = r.pos.y - b.pos.y;
-          if (hx * hx + hy * hy < 18 * 18) {
+          float hitRadius = PLAYER_RADIUS + b.radius;
+          if (hx * hx + hy * hy < hitRadius * hitRadius) {
             char buf[48];
-            snprintf(buf, sizeof buf, "H|%d|%d", rid, 25);
+            snprintf(buf, sizeof buf, "H|%d|%d", rid, b.damage);
             sock.send(buf);
-            fx.burst(b.pos, 15, 300, teamColor(b.team));
+            fx.burst(b.pos, b.super ? 30 : 15, b.super ? 420 : 300,
+                     teamColor(b.team));
             dead = true;
             break;
           }
@@ -303,14 +439,44 @@ int main(int argc, char **argv) {
       DrawLine(0, y, SW, y, Color{20, 20, 35, 255});
 
     fx.draw();
+    for (auto &b : bullets) {
+      Color c = teamColor(b.team);
+      BeginBlendMode(BLEND_ADDITIVE);
+      DrawCircleV(b.pos, b.radius * 2.0f, Fade(c, b.super ? 0.32f : 0.18f));
+      DrawCircleV(b.pos, b.radius, Fade(c, b.super ? 0.85f : 0.65f));
+      DrawCircleV(b.pos, b.super ? 4.0f : 2.0f, WHITE);
+      EndBlendMode();
+    }
     for (auto &[rid, r] : remotes) drawWisp(r.pos, teamColor(r.team));
     drawWisp(me, teamColor(myTeam));
 
     DrawRectangle(20, 20, 200, 14, Color{40, 40, 40, 255});
     DrawRectangle(20, 20, hp * 2, 14, teamColor(myTeam));
+    std::string statusText;
+    std::string detailText;
+    {
+      std::lock_guard<std::mutex> l(mtx);
+      statusText = connectionStatus;
+      detailText = connectionDetail;
+    }
     DrawText(myId >= 0 ? TextFormat("ID %d  TEAM %d", myId, myTeam)
-                       : "connecting...",
+                       : statusText.c_str(),
              20, 42, 18, GRAY);
+    if (myId >= 0) {
+      float superReady = 1.0f - std::clamp(superCd / SUPER_COOLDOWN, 0.0f, 1.0f);
+      float dashReady = 1.0f - std::clamp(dashCd / DASH_COOLDOWN, 0.0f, 1.0f);
+      DrawText(TextFormat("SUPER %.0f%%", superReady * 100.0f), 20, 64, 14,
+               LIGHTGRAY);
+      DrawRectangle(100, 66, 90, 8, Color{40, 40, 40, 255});
+      DrawRectangle(100, 66, (int)(90 * superReady), 8, Color{235, 225, 90, 255});
+      DrawText(TextFormat("DASH %.0f%%", dashReady * 100.0f), 20, 82, 14,
+               LIGHTGRAY);
+      DrawRectangle(100, 84, 90, 8, Color{40, 40, 40, 255});
+      DrawRectangle(100, 84, (int)(90 * dashReady), 8, Color{120, 245, 210, 255});
+    }
+    if (myId < 0 && !detailText.empty()) {
+      DrawText(detailText.c_str(), 20, 64, 14, DARKGRAY);
+    }
     EndDrawing();
   }
 

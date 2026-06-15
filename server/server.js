@@ -26,11 +26,10 @@ const server = Bun.serve({
   fetch(req, server) {
     if (server.upgrade(req)) return;
 
-    return new Response("Wisp Arena websocket server\n", {
-      status: 426,
+    return new Response("Wisp Arena server online\n", {
+      status: 200,
       headers: {
         "Content-Type": "text/plain; charset=utf-8",
-        "Upgrade": "websocket",
       },
     });
   },
@@ -61,6 +60,10 @@ const server = Bun.serve({
       if (p[0] === "P") ws.publish(topic, `P|${id}|${p[1]}|${p[2]}|${team}`);
       else if (p[0] === "F")
         ws.publish(topic, `F|${id}|${p[1]}|${p[2]}|${p[3]}|${p[4]}|${team}`);
+      else if (p[0] === "S")
+        ws.publish(topic, `S|${id}|${p[1]}|${p[2]}|${p[3]}|${p[4]}|${team}`);
+      else if (p[0] === "D")
+        ws.publish(topic, `D|${id}|${p[1]}|${p[2]}|${p[3]}|${p[4]}|${team}`);
       else if (p[0] === "H") ws.publish(topic, `H|${p[1]}|${p[2]}`);
     },
 
