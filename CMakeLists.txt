@@ -30,8 +30,8 @@ endif()
 target_link_libraries(wisp-arena PRIVATE ${WISP_RAYLIB_TARGET} ${WISP_IXWEBSOCKET_TARGET})
 
 if(WIN32)
-  target_compile_definitions(wisp-arena PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
-  set_target_properties(wisp-arena PROPERTIES WIN32_EXECUTABLE TRUE)
+  target_compile_definitions(wisp-arena PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX NOGDI NOUSER)
+  target_link_libraries(wisp-arena PRIVATE bcrypt)
 
   add_custom_command(
     TARGET wisp-arena
