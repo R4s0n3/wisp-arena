@@ -1,0 +1,55 @@
+name: Windows Client
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: "WebSocket server URL written to server-url.txt"
+        required: false
+        default: "ws://localhost:9001"
+
+jobs:
+  build:
+    name: Build Windows client
+    runs-on: windows-latest
+
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Check out vcpkg
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/vcpkg
+          path: vcpkg
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: '& "$env:VCPKG_ROOT\bootstrap-vcpkg.bat"'
+
+      - name: Configure
+        run: cmake --preset windows-release
+
+      - name: Build
+        run: cmake --build --preset windows-release
+
+      - name: Package
+        shell: pwsh
+        env:
+          WISP_SERVER_URL: ${{ github.event.inputs.server_url }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:WISP_SERVER_URL)) {
+            $env:WISP_SERVER_URL = "ws://localhost:9001"
+          }
+          .\scripts\package-windows.ps1
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: wisp-arena-windows
+          path: dist/wisp-arena-windows.zip

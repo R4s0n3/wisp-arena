@@ -1,0 +1,8 @@
+{
+  "name": "wisp-arena",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "ixwebsocket",
+    "raylib"
+  ]
+}

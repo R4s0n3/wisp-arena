@@ -3,13 +3,23 @@
 #include <ixwebsocket/IXWebSocket.h>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 static const int SW = 1280, SH = 720;
 static const int MAX_PARTICLES = 4096;
+static const char *DEFAULT_SERVER_URL = "ws://localhost:9001";
 
 static float frand(float a, float b) {
   return a + (b - a) * (float)GetRandomValue(0, 1000) / 1000.0f;
@@ -73,8 +83,61 @@ static void drawWisp(Vector2 p, Color c) {
   EndBlendMode();
 }
 
+static std::string trim(std::string s) {
+  while (!s.empty() && (s.back() == '\r' || s.back() == '\n' ||
+                        s.back() == ' ' || s.back() == '\t')) {
+    s.pop_back();
+  }
+  size_t first = 0;
+  while (first < s.size() &&
+         (s[first] == '\r' || s[first] == '\n' || s[first] == ' ' ||
+          s[first] == '\t')) {
+    ++first;
+  }
+  return s.substr(first);
+}
+
+static std::string readFirstLine(const std::string &path) {
+  std::ifstream file(path);
+  std::string line;
+  if (!file || !std::getline(file, line)) return "";
+  return trim(line);
+}
+
+static std::string executableDir() {
+#ifdef _WIN32
+  char path[MAX_PATH] = {};
+  DWORD len = GetModuleFileNameA(nullptr, path, MAX_PATH);
+  if (len == 0 || len == MAX_PATH) return "";
+  std::string full(path, len);
+  size_t slash = full.find_last_of("\\/");
+  return slash == std::string::npos ? "" : full.substr(0, slash);
+#else
+  return "";
+#endif
+}
+
+static std::string resolveServerUrl(int argc, char **argv) {
+  if (argc > 1 && argv[1][0] != '\0') return argv[1];
+
+  if (const char *env = std::getenv("WISP_SERVER_URL")) {
+    if (env[0] != '\0') return env;
+  }
+
+  std::string url = readFirstLine("server-url.txt");
+  if (!url.empty()) return url;
+
+  std::string dir = executableDir();
+  if (!dir.empty()) {
+    url = readFirstLine(dir + "\\server-url.txt");
+    if (!url.empty()) return url;
+  }
+
+  return DEFAULT_SERVER_URL;
+}
+
 int main(int argc, char **argv) {
-  const char *url = argc > 1 ? argv[1] : "ws://localhost:9001";
+  std::string url = resolveServerUrl(argc, argv);
 
   // --- networking ---
   ix::initNetSystem();
@@ -253,4 +316,6 @@ int main(int argc, char **argv) {
 
   sock.stop();
   CloseWindow();
-  ix::uninit
+  ix::uninitNetSystem();
+  return 0;
+}

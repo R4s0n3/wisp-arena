@@ -1,0 +1,8 @@
+build/
+dist/
+client/build/
+server/node_modules/
+*.user
+*.suo
+*.ninja
+*.log

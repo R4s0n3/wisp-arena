@@ -1,9 +1,10 @@
-const uWS = require("uWebSockets.js");
-const PORT = 9001;
+const PORT = Number.parseInt(process.env.PORT || "9001", 10);
+const HOST = process.env.HOST || "0.0.0.0";
 const MAX = 6; // 3v3
 
 let lobbies = [];
 let nextId = 1;
+const wsInfo = new WeakMap();
 
 function findLobby() {
   let l = lobbies.find((l) => l.players.size < MAX);
@@ -14,28 +15,46 @@ function findLobby() {
   return l;
 }
 
-const app = uWS
-  .App()
-  .ws("/*", {
+if (!Number.isInteger(PORT) || PORT <= 0 || PORT > 65535) {
+  throw new Error(`Invalid PORT: ${process.env.PORT}`);
+}
+
+const server = Bun.serve({
+  hostname: HOST,
+  port: PORT,
+
+  fetch(req, server) {
+    if (server.upgrade(req)) return;
+
+    return new Response("Wisp Arena websocket server\n", {
+      status: 426,
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Upgrade": "websocket",
+      },
+    });
+  },
+
+  websocket: {
     idleTimeout: 60,
 
-    open: (ws) => {
+    open(ws) {
       const lobby = findLobby();
       const counts = [0, 0];
       for (const p of lobby.players.values()) counts[p.team]++;
       const team = counts[0] <= counts[1] ? 0 : 1;
       const id = nextId++;
 
-      ws.info = { id, team, lobby };
+      wsInfo.set(ws, { id, team, lobby });
       lobby.players.set(ws, { id, team });
       ws.subscribe("lobby" + lobby.id);
       ws.send(`W|${id}|${team}`);
       console.log(`player ${id} joined lobby ${lobby.id} (team ${team})`);
     },
 
-    message: (ws, msg) => {
-      const s = Buffer.from(msg).toString();
-      const { id, team, lobby } = ws.info;
+    message(ws, msg) {
+      const s = typeof msg === "string" ? msg : Buffer.from(msg).toString();
+      const { id, team, lobby } = wsInfo.get(ws);
       const topic = "lobby" + lobby.id;
       const p = s.split("|");
 
@@ -45,15 +64,15 @@ const app = uWS
       else if (p[0] === "H") ws.publish(topic, `H|${p[1]}|${p[2]}`);
     },
 
-    close: (ws) => {
-      const { id, lobby } = ws.info || {};
+    close(ws) {
+      const { id, lobby } = wsInfo.get(ws) || {};
       if (!lobby) return;
       lobby.players.delete(ws);
-      app.publish("lobby" + lobby.id, `L|${id}`);
+      server.publish("lobby" + lobby.id, `L|${id}`);
       if (lobby.players.size === 0) lobbies = lobbies.filter((l) => l !== lobby);
       console.log(`player ${id} left`);
     },
-  })
-  .listen(PORT, (ok) =>
-    console.log(ok ? `Wisp Arena server on :${PORT}` : "Failed to listen")
-  );
+  },
+});
+
+console.log(`Wisp Arena server on ${server.hostname}:${server.port}`);

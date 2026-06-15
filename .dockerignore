@@ -1,0 +1,10 @@
+.git
+.github
+.agents
+.codex
+build/
+dist/
+client/build/
+server/node_modules/
+node_modules/
+*.log
